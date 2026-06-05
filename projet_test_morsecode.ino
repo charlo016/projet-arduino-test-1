@@ -1,37 +1,40 @@
 /*
-  ESP32 Morse Code Decoder
-  Freenove ESP32-S3-WROOM
+  ESP32 WiFi Morse Code Decoder
+  Target: Freenove ESP32-S3-WROOM
 
-  - Crée un réseau WiFi "ESP32-Morse"
-  - Affiche l'IP dans le moniteur série
-  - Bouton BOOT (GPIO 0) : court = point (·), long = tiret (—)
-  - Interface web en temps réel sur http://192.168.4.1
+  Creates a WiFi access point, hosts a web interface that displays
+  real-time Morse code input decoded from the BOOT button.
+
+  - Short press (<300ms) : dot   — LED flickers
+  - Long press  (>=300ms): dash  — LED stays on until release
+  - 1.5s silence          : end of letter, auto-decode
+  - 3.5s silence          : word gap (space added)
 */
 
 #include <WiFi.h>
 #include <WebServer.h>
 
 // ========================
-//  BROCHES
+//  PIN DEFINITIONS
 // ========================
-#define LED_PIN    2   // LED embarquée (changer à 48 si RGB sur ton modèle)
-#define BUTTON_PIN 0   // Bouton BOOT
+#define LED_PIN    2   // Onboard LED (change to 48 if your board uses NeoPixel)
+#define BUTTON_PIN 0   // BOOT button
 
 // ========================
-//  RÉSEAU
+//  NETWORK
 // ========================
 const char* AP_SSID = "ESP32-Morse";
 const char* AP_PASS = "12345678";
 
 // ========================
-//  TIMING MORSE (ms)
+//  MORSE TIMING (ms)
 // ========================
-const unsigned long DASH_THRESHOLD = 300;   // < 300ms = point, >= 300ms = tiret
-const unsigned long CHAR_GAP       = 1500;  // silence = fin de lettre
-const unsigned long WORD_GAP       = 3500;  // silence = nouveau mot
+const unsigned long DASH_THRESHOLD = 300;   // below = dot, at or above = dash
+const unsigned long CHAR_GAP       = 1500;  // silence to end a character
+const unsigned long WORD_GAP       = 3500;  // silence to start a new word
 
 // ========================
-//  TABLE MORSE
+//  MORSE LOOKUP TABLE
 // ========================
 const struct { const char* code; char ch; } MORSE[] = {
   {".-",'A'},{"-...",'B'},{"-.-.",'C'},{"-..",'D'},{".",'E'},
@@ -52,17 +55,17 @@ char decodeMorse(const String& code) {
 }
 
 // ========================
-//  ÉTAT
+//  STATE
 // ========================
-String currentMorse  = "";
-String decodedText   = "";
+String currentMorse  = "";  // symbol sequence for the character being typed
+String decodedText   = "";  // full decoded message
 
-bool     buttonWasPressed = false;
-unsigned long pressStart  = 0;
-unsigned long lastRelease = 0;
+bool          buttonWasPressed = false;
+unsigned long pressStart       = 0;
+unsigned long lastRelease      = 0;
 
 // ========================
-//  SERVEUR WEB
+//  WEB SERVER
 // ========================
 WebServer server(80);
 
@@ -140,9 +143,7 @@ poll();
 </html>
 )rawhtml";
 
-void onRoot() {
-  server.send_P(200, "text/html", HTML);
-}
+void onRoot()      { server.send_P(200, "text/html", HTML); }
 
 void onState() {
   String json = "{\"cur\":\"" + currentMorse + "\",\"msg\":\"" + decodedText + "\"}";
@@ -181,23 +182,21 @@ void setup() {
   WiFi.softAP(AP_SSID, AP_PASS);
   IPAddress ip = WiFi.softAPIP();
 
-  Serial.println(F("\n╔══════════════════════════════╗"));
-  Serial.println(F("║   ESP32 - Décodeur Morse     ║"));
-  Serial.println(F("╚══════════════════════════════╝"));
+  Serial.println(F("\n================================"));
+  Serial.println(F("   ESP32 - Morse Code Decoder"));
+  Serial.println(F("================================"));
   Serial.print(F("SSID      : ")); Serial.println(AP_SSID);
   Serial.print(F("Mot passe : ")); Serial.println(AP_PASS);
   Serial.print(F("URL       : http://")); Serial.println(ip);
-  Serial.println(F("Ouvre cette URL dans ton navigateur\n"));
+  Serial.println(F("================================"));
+  Serial.println(F("Court (<300ms) = point   Long (>=300ms) = tiret\n"));
 
-  server.on("/",         onRoot);
-  server.on("/state",    onState);
-  server.on("/clear",    onClear);
-  server.on("/backspace",onBackspace);
-  server.on("/space",    onSpace);
+  server.on("/",          onRoot);
+  server.on("/state",     onState);
+  server.on("/clear",     onClear);
+  server.on("/backspace", onBackspace);
+  server.on("/space",     onSpace);
   server.begin();
-
-  Serial.println(F("Serveur web démarré. Prêt!"));
-  Serial.println(F("Court = point (·)   Long = tiret (—)\n"));
 }
 
 // ========================
@@ -209,13 +208,13 @@ void loop() {
   bool pressed = (digitalRead(BUTTON_PIN) == LOW);
   unsigned long now = millis();
 
-  // Bouton vient d'être appuyé
+  // Button just pressed
   if (pressed && !buttonWasPressed) {
     pressStart = now;
     digitalWrite(LED_PIN, HIGH);
   }
 
-  // Bouton vient d'être relâché
+  // Button just released
   if (!pressed && buttonWasPressed) {
     unsigned long dur = now - pressStart;
     digitalWrite(LED_PIN, LOW);
@@ -223,14 +222,14 @@ void loop() {
 
     if (dur < DASH_THRESHOLD) {
       currentMorse += '.';
-      Serial.print(F("· "));
+      Serial.print(F(". "));
     } else {
       currentMorse += '-';
-      Serial.print(F("— "));
+      Serial.print(F("- "));
     }
   }
 
-  // Détection des pauses (lettre / mot)
+  // Check for letter/word gap while idle
   if (!pressed && currentMorse.length() > 0 && lastRelease > 0) {
     unsigned long gap = now - lastRelease;
 
@@ -239,7 +238,7 @@ void loop() {
       decodedText += c;
       decodedText += ' ';
       Serial.println();
-      Serial.print(F(">> Mot : ")); Serial.println(decodedText);
+      Serial.print(F(">> Word: ")); Serial.println(decodedText);
       currentMorse = "";
       lastRelease  = 0;
 
@@ -247,8 +246,8 @@ void loop() {
       char c = decodeMorse(currentMorse);
       decodedText += c;
       Serial.println();
-      Serial.print(F(">> Lettre : ")); Serial.println(String(c));
-      Serial.print(F(">> Texte  : ")); Serial.println(decodedText);
+      Serial.print(F(">> Char: ")); Serial.println(String(c));
+      Serial.print(F(">> Text: ")); Serial.println(decodedText);
       currentMorse = "";
       lastRelease  = 0;
     }
